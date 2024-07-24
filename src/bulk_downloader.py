@@ -136,7 +136,7 @@ class Prefix(Enum):
 
 
 class Episode:
-    def __init__(self, url: str, title: str, date_time: datetime.datetime):
+    def __init__(self, url: str, title: str, description: str, date_time: datetime.datetime):
         """
         Constructor for a podcast episode
         @param url: URL of the MP3 file
@@ -146,6 +146,7 @@ class Episode:
         self._url = url
         self._title = title
         self._date_time = date_time
+        self._description = description
 
     def title(self, title: str = None) -> str:
         if title is not None:
@@ -165,6 +166,9 @@ class Episode:
     def get_date_time(self) -> datetime.datetime:
         return self._date_time
 
+    def description(self) -> str:
+        return self._description
+
     def get_ext(self) -> str:
         parsed = urlparse(self.url())
         _, ext = splitext(parsed.path)
@@ -183,11 +187,66 @@ class Episode:
         return filename
 
     def __str__(self) -> str:
-        return 'Episode "{}" ({})'.format(self.title(), self.url())
+        return 'Episode "{}" ({}) {}'.format(self.title(), self.url(), self.description()[0:40]) # what if no descript?
 
+class DescriptionFile:
+    template = \
+'''
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>{}</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    {}
+  </body>
+</html>
+'''
+    ep_template = \
+'''
+<h3>{}</h3>
+<a href = "{}">{}</a>
+<p>{}</p>
+'''
+    ep_local: tuple[Episode, str] = []
+
+    def __init__(self):
+        # pass
+        return None
+
+    def add(self, ep: tuple[Episode, str]):
+        self.ep_local.append(ep)
+        logging.info(ep)
+
+    def write(self, path: str):
+        eps = []
+        for (ep, eppath) in self.ep_local:
+            # path ... relative
+            # options: relative path, 
+            eps.append(self.ep_template.format(ep.title(), os.path.join(".", eppath), eppath, ep.description()))
+
+
+        output = self.template.format('todo', ''.join(eps))
+        try:
+            if os.path.isfile(path):
+                logging.info('Overwriting desc file at {}'.format(path))
+            else:
+                logging.info('Writing desc file at {}'.format(path))
+            
+            # check output path = html
+            with open(path, 'w', encoding = 'utf-8') as f:
+                print(output)
+                f.write(output)
+
+        except Exception as e:
+            logging.error('Error writing desc file: {}'.format(str(e)))
 
 class BulkDownloader:
-    def __init__(self, url: str, folder: str = None, last_n: int = 0, overwrite: bool = True,
+    def __init__(self, url: str, folder: str = None, last_n: int = 0, desc_file: str = None, overwrite: bool = True,
                  prefix: Prefix = Prefix.NO_PREFIX):
         """
         Constructor of the bulkdownloader
@@ -200,6 +259,7 @@ class BulkDownloader:
         self._url = url
         self._folder = folder
         self._last_n = last_n
+        self._desc_file = desc_file
         self._overwrite = overwrite
         self._prefix = prefix
 
@@ -212,6 +272,9 @@ class BulkDownloader:
         if n is not None:
             self._last_n = n
         return self._last_n
+
+    def desc_file(self):
+        return self._desc_file
 
     def overwrite(self, overwrite: bool = None) -> bool:
         """
@@ -320,7 +383,15 @@ class BulkDownloader:
             logging.error(err_str)
             raise BulkDownloaderException(err_str)
 
+        # optional
+        if not os.path.exists(self.folder()):
+            err_str = 'Folder does not exist, please choose a folder that exists'
+            logging.error(err_str)
+            raise BulkDownloaderException(err_str)
+
+
         to_download = self.list_mp3(cb)
+        df = DescriptionFile()
         logging.info('{} files will be downloaded'.format(len(to_download)))
         if cb and cb.is_cancelled():
             return
@@ -334,6 +405,7 @@ class BulkDownloader:
         for episode in to_download:
             if cb:
                 if cb.is_cancelled():
+                    df.write(self.desc_file())
                     continue
                 cb.progress(count * step)
 
@@ -351,6 +423,7 @@ class BulkDownloader:
                              .format(name, path))
                 downloads_skipped += 1
                 count += 1
+                df.add((episode, path))
                 continue
 
             # Download file
@@ -359,11 +432,13 @@ class BulkDownloader:
                 cb.set_function(lambda x: (count + x / 100) * step)
             if not dry_run and try_download(episode.url(), path, cb=cb):
                 downloads_successful += 1
+                df.add((episode, path))
             if cb:
                 cb.set_function(lambda x: x)
             count += 1
 
         if cb and cb.is_cancelled():
+            df.write(self.desc_file())
             return
 
         if cb:
@@ -372,6 +447,7 @@ class BulkDownloader:
                                                                           nb_downloads))
         logging.info('{}/{} episodes were skipped because files already existed'
                      .format(downloads_skipped, nb_downloads))
+        df.write(self.desc_file())
 
     @staticmethod
     def _get_episodes_to_download_from_rss(page) -> List[Episode]:
@@ -380,7 +456,7 @@ class BulkDownloader:
         for item in pod_feed.items:
             pub_date_time = datetime.datetime.utcfromtimestamp(item.time_published) \
                 if item.time_published > 0 else item.published_date
-            episodes.append(Episode(item.enclosure_url, item.title, pub_date_time))
+            episodes.append(Episode(item.enclosure_url, item.title, item.description, pub_date_time))
         return episodes
 
     @staticmethod
@@ -392,7 +468,7 @@ class BulkDownloader:
             return False
 
 
-def download_mp3s(url: str, folder: str, last_n: int, overwrite: bool = True, prefix: Prefix = Prefix.NO_PREFIX):
+def download_mp3s(url: str, folder: str, last_n: int, desc_file: str, overwrite: bool = True, prefix: Prefix = Prefix.NO_PREFIX):
     """
     Will create a BulkDownloader and download all the mp3s from an URL to the folder
     @param url: Directory/RSS url
@@ -406,7 +482,7 @@ def download_mp3s(url: str, folder: str, last_n: int, overwrite: bool = True, pr
         logging.info('Already existing file will be overwritten')
     else:
         logging.info('Already existing file won\'t be overwritten')
-    bulk_downloader = BulkDownloader(url, folder, last_n, overwrite, prefix)
+    bulk_downloader = BulkDownloader(url, folder, last_n, desc_file, overwrite, prefix)
     bulk_downloader.download_mp3()
 
 
@@ -436,6 +512,9 @@ def main() -> int:
                         help='Only download the last N episodes, if N=0, download all the episodes')
     parser.add_argument('--prefix', dest='prefix', type=Prefix.from_string, choices=list(Prefix),
                         default=Prefix.NO_PREFIX, help='Prefix for the filename')
+    parser.add_argument('-d', '--desc-file', dest='desc_file', 
+                        help='Output file to write each episode descriptions')
+                        # default = podcast name dot html
     args = parser.parse_args()
 
     if args.version:
@@ -445,8 +524,12 @@ def main() -> int:
         logging.error('You need to set both URL and FOLDER')
         return 1
 
+    if not args.desc_file:
+        logging.error('TEMPORARY: you need to set an output file for descriptions')
+        return 1
+
     try:
-        download_mp3s(args.url, args.folder, int(args.last_n), args.overwrite, args.prefix)
+        download_mp3s(args.url, args.folder, int(args.last_n), args.desc_file, args.overwrite, args.prefix)
     except Exception as exc:
         logging.error(exc)
         return 1
